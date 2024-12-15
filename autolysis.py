@@ -141,13 +141,13 @@ Column Information:
 {pd.Series(analysis['outliers']).to_string()}
 
 **Your Task:**
-1. Provide a detailed narrative explaining:
+1. Provide a unique detailed narrative explaining:
    - The structure and key characteristics of the dataset.
    - The analysis performed and its significance.
    - Insights uncovered from the data, focusing on trends, anomalies, and relationships.
 2. Recommend actionable next steps for further exploration or decision-making.
 3. A brief conclusion of the whole analysis.
-4. The readme file must look professional and explain every findings and draw proper insights from them.
+4. The readme file must robust and look professional to explain every findings and draw proper insights from them.
 """
 
     data = {
