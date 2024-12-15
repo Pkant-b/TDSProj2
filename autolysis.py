@@ -33,7 +33,7 @@ load_dotenv()
 # Constants
 API_URL = "https://aiproxy.sanand.workers.dev/openai/v1/chat/completions"
 AIPROXY_TOKEN = os.getenv("AIPROXY_TOKEN")  # API token from environment
-MAX_VISUALIZATIONS = 5  # Set a limit on the number of visualizations
+MAX_VISUALIZATIONS = 3  # Set a limit on the number of visualizations
 
 if not AIPROXY_TOKEN:
     raise ValueError("API token not set. Please set AIPROXY_TOKEN in the environment.")
@@ -55,17 +55,16 @@ def analyze_data(df):
     analysis = {
         'summary': df.describe(include='all').to_dict(),  # Summary stats
         'missing_values': df.isnull().sum().to_dict(),   # Count missing values per column
-        'correlation': numeric_df.corr().to_dict()       # Correlation matrix for numeric columns
+        'correlation': numeric_df.corr().to_dict(),       # Correlation matrix for numeric columns
+        'outliers': {}                                    # Outlier detection
     }
 
     # Outlier detection using IQR
-    outliers = {}
     for column in numeric_df.columns:
         Q1 = numeric_df[column].quantile(0.25)
         Q3 = numeric_df[column].quantile(0.75)
         IQR = Q3 - Q1
-        outliers[column] = numeric_df[(numeric_df[column] < Q1 - 1.5 * IQR) | (numeric_df[column] > Q3 + 1.5 * IQR)].shape[0]
-    analysis['outliers'] = outliers
+        analysis['outliers'][column] = numeric_df[(numeric_df[column] < Q1 - 1.5 * IQR) | (numeric_df[column] > Q3 + 1.5 * IQR)].shape[0]
 
     return analysis
 
@@ -99,7 +98,7 @@ def visualize_data(df, output_dir):
         plt.close()
 
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
-def generate_narrative(file_path, column_info, df_info, df_describe, missing_values):
+def generate_narrative(file_path, column_info, df_info, df_describe, missing_values, outliers):
     """Generate a narrative from the analysis using an API call."""
     headers = {
         'Authorization': f'Bearer {AIPROXY_TOKEN}',  # Bearer token for authorization
@@ -120,6 +119,9 @@ def generate_narrative(file_path, column_info, df_info, df_describe, missing_val
 
     Missing Values:
     {missing_values}
+
+    Outliers Detected:
+    {outliers}
 
     Please write a summary of this analysis, including insights and recommendations.
     """
@@ -154,9 +156,10 @@ def generate_readme(df, file_path, analysis, output_dir):
     df_info = buffer.getvalue()
     df_describe = df.describe(include='all').to_string()
     missing_values = pd.Series(analysis['missing_values']).to_string()
+    outliers = pd.Series(analysis['outliers']).to_string()
 
     # Generate narrative using analysis
-    narrative = generate_narrative(file_path, column_info, df_info, df_describe, missing_values)
+    narrative = generate_narrative(file_path, column_info, df_info, df_describe, missing_values, outliers)
 
     # Write README content
     readme_content = f"""# Analysis of {file_path}
