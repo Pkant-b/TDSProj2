@@ -20,10 +20,8 @@ import matplotlib
 import matplotlib.pyplot as plt
 import httpx
 import chardet
-import json
 from tenacity import retry, stop_after_attempt, wait_fixed
 from dotenv import load_dotenv
-from io import StringIO
 from typing import Dict
 
 # Use a non-interactive backend for matplotlib
@@ -119,6 +117,9 @@ def generate_story_with_function_call(df: pd.DataFrame, file_path: str, analysis
         for col in df.columns
     }
 
+    # Pass only the number of null values for each column
+    missing_values = pd.Series(analysis['missing_values']).to_string()
+
     prompt = f"""
 You are an AI data analyst. Here's a detailed analysis of a dataset provided by the user.
 
@@ -133,7 +134,7 @@ Column Information:
 - Summary Statistics:
 {pd.DataFrame(analysis['summary']).to_string()}
 - Missing Values:
-{pd.Series(analysis['missing_values']).to_string()}
+{missing_values}
 - Correlation Insights:
 {pd.DataFrame(analysis['correlation']).to_string()}
 - Outliers Detected:
@@ -145,6 +146,8 @@ Column Information:
    - The analysis performed and its significance.
    - Insights uncovered from the data, focusing on trends, anomalies, and relationships.
 2. Recommend actionable next steps for further exploration or decision-making.
+3. A brief conclusion of the whole analysis.
+4. The readme file must look professional and explain every findings and draw proper insights from them.
 """
 
     data = {
@@ -172,12 +175,12 @@ def generate_readme(df: pd.DataFrame, file_path: str, analysis: Dict, output_dir
     categorical_columns = df.select_dtypes(include=['object']).columns
 
     # Add visualizations dynamically
-    visualizations = "### Visualizations\n"
+    visualizations = "## Visualizations\n"
 
     # Heatmap visualization
     if len(numeric_columns) > 1:
         visualizations += """
-### Correlation Matrix Heatmap
+## Correlation Matrix Heatmap
 ![Correlation Matrix Heatmap](correlation_matrix_heatmap.png)
 
 This heatmap visualizes the relationships between numeric features in the dataset.
@@ -186,18 +189,19 @@ This heatmap visualizes the relationships between numeric features in the datase
     # Histogram for the first numeric column
     if len(numeric_columns) > 0:
         visualizations += f"""
-### Distribution of {numeric_columns[0]}
+## Distribution of {numeric_columns[0]}
 ![{numeric_columns[0]} Distribution]({numeric_columns[0]}_distribution.png)
 
 This histogram shows the distribution of the numeric column '{numeric_columns[0]}', providing insights into its spread and frequency.
 """
 
     # Bar chart for the most frequent categorical column
-    if len(categorical_columns) > 0:
-        column_to_plot = min(categorical_columns, key=lambda col: df[col].nunique())
+    if len(categorical_columns) > 0: 
+        column_to_plot = min(categorical_columns, key=lambda col: df[col].nunique()) 
+        column_filename = f'{column_to_plot}_bar_chart.png' 
         if df[column_to_plot].nunique() > 1:  # Ensure the column has more than 1 unique value
             visualizations += f"""
-### Distribution of {column_to_plot}
+## Distribution of {column_to_plot}
 ![{column_to_plot} Bar Chart]({column_to_plot}_bar_chart.png)
 
 This bar chart shows the distribution of the categorical column '{column_to_plot}', highlighting the frequency of each category.
@@ -208,10 +212,7 @@ This bar chart shows the distribution of the categorical column '{column_to_plot
         print("No categorical columns available for bar chart.")
 
     # Final README content
-    readme_content = f"""# Analysis of {os.path.basename(file_path)}
-
-## Dataset Overview
-
+    readme_content = f"""
 {narrative}
 
 {visualizations}
