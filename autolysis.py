@@ -32,8 +32,8 @@ load_dotenv()
 
 # Constants
 API_URL = "https://aiproxy.sanand.workers.dev/openai/v1/chat/completions"
-AIPROXY_TOKEN = os.getenv("AIPROXY_TOKEN")  # API token from environment
-MAX_VISUALIZATIONS = 3  # Set a limit on the number of visualizations
+AIPROXY_TOKEN = os.getenv("AIPROXY_TOKEN")
+MAX_VISUALIZATIONS = 3
 
 if not AIPROXY_TOKEN:
     raise ValueError("API token not set. Please set AIPROXY_TOKEN in the environment.")
@@ -42,24 +42,23 @@ def load_data(file_path):
     """Load CSV data with automatic encoding detection."""
     try:
         with open(file_path, 'rb') as f:
-            result = chardet.detect(f.read())  # Detect file encoding
+            result = chardet.detect(f.read())
         encoding = result['encoding']
-        return pd.read_csv(file_path, encoding=encoding)  # Load the CSV with detected encoding
+        return pd.read_csv(file_path, encoding=encoding)
     except Exception as e:
         print(f"Error loading file: {e}")
         sys.exit(1)
 
 def analyze_data(df):
     """Perform basic analysis: summary stats, missing values, and correlation."""
-    numeric_df = df.select_dtypes(include=['number'])  # Select numeric columns only
+    numeric_df = df.select_dtypes(include=['number'])
     analysis = {
-        'summary': df.describe(include='all').to_dict(),  # Summary stats
-        'missing_values': df.isnull().sum().to_dict(),   # Count missing values per column
-        'correlation': numeric_df.corr().to_dict(),       # Correlation matrix for numeric columns
-        'outliers': {}                                    # Outlier detection
+        'summary': df.describe(include='all').to_dict(),
+        'missing_values': df.isnull().sum().to_dict(),
+        'correlation': numeric_df.corr().to_dict(),
+        'outliers': {}
     }
 
-    # Outlier detection using IQR
     for column in numeric_df.columns:
         Q1 = numeric_df[column].quantile(0.25)
         Q3 = numeric_df[column].quantile(0.75)
@@ -71,9 +70,8 @@ def analyze_data(df):
 def visualize_data(df, output_dir):
     """Create and save main plots for the dataset."""
     sns.set(style="whitegrid")
-    numeric_columns = df.select_dtypes(include=['number']).columns[:MAX_VISUALIZATIONS]  # Limit the number of visualizations
+    numeric_columns = df.select_dtypes(include=['number']).columns[:MAX_VISUALIZATIONS]
 
-    # Heatmap of the correlation matrix
     if len(numeric_columns) > 1:
         plt.figure(figsize=(10, 8))
         sns.heatmap(df[numeric_columns].corr(), annot=True, cmap="coolwarm", fmt=".2f")
@@ -81,7 +79,6 @@ def visualize_data(df, output_dir):
         plt.savefig(os.path.join(output_dir, 'correlation_matrix_heatmap.png'), dpi=100)
         plt.close()
 
-    # Histogram for the first numeric column
     if len(numeric_columns) > 0:
         plt.figure()
         sns.histplot(df[numeric_columns[0]].dropna(), kde=True)
@@ -89,107 +86,112 @@ def visualize_data(df, output_dir):
         plt.savefig(os.path.join(output_dir, f'{numeric_columns[0]}_distribution.png'), dpi=100)
         plt.close()
 
-    # Scatter plot for the first two numeric columns (if available)
-    if len(numeric_columns) > 1:
+    categorical_columns = df.select_dtypes(include=['object']).columns
+    if len(categorical_columns) > 0:
+        column_to_plot = min(categorical_columns, key=lambda col: df[col].nunique())
         plt.figure()
-        sns.scatterplot(x=df[numeric_columns[0]], y=df[numeric_columns[1]])
-        plt.title(f'Scatter Plot of {numeric_columns[0]} vs {numeric_columns[1]}')
-        plt.savefig(os.path.join(output_dir, f'{numeric_columns[0]}_vs_{numeric_columns[1]}_scatter.png'), dpi=100)
+        sns.countplot(y=column_to_plot, data=df, order=df[column_to_plot].value_counts().index)
+        plt.title(f'Distribution of {column_to_plot}')
+        plt.xlabel('Count')
+        plt.savefig(os.path.join(output_dir, f'{column_to_plot}_bar_chart.png'), dpi=100)
         plt.close()
 
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
-def generate_narrative(file_path, column_info, df_info, df_describe, missing_values, outliers):
-    """Generate a narrative from the analysis using an API call."""
+def generate_story(file_path, column_info, df_info, summary, missing_values, correlation, outliers):
+    """Generate a narrative from the analysis using LLM."""
     headers = {
-        'Authorization': f'Bearer {AIPROXY_TOKEN}',  # Bearer token for authorization
+        'Authorization': f'Bearer {AIPROXY_TOKEN}',
         'Content-Type': 'application/json'
     }
     prompt = f"""
-    You are analyzing a dataset. Below are details about it:
+    You are an AI assisting with data analysis. Here's the analysis:
 
-    File: {file_path}
-    Columns and Data Types:
-    {column_info}
+    **Dataset Information:**
+    File Path: {file_path}
+    Columns and Data Types: {column_info}
+    Dataset Info: {df_info}
+    Summary Statistics: {summary}
+    Missing Values: {missing_values}
+    Correlation: {correlation}
+    Outliers: {outliers}
 
-    Dataset Info:
-    {df_info}
-
-    Summary Statistics:
-    {df_describe}
-
-    Missing Values:
-    {missing_values}
-
-    Outliers Detected:
-    {outliers}
-
-    Please write a summary of this analysis, including insights and recommendations.
+    Write a detailed story explaining:
+    1. The dataset and its key features.
+    2. The analysis performed and its significance.
+    3. Key insights uncovered, including insights from outliers.
+    4. Implications and recommended actions based on findings.
     """
     data = {
-        "model": "gpt-4o-mini",  # Specify the model
+        "model": "gpt-4o-mini",
         "messages": [{"role": "user", "content": prompt}]
     }
     try:
         response = httpx.post(API_URL, headers=headers, json=data, timeout=90.0)
-        response.raise_for_status()  # Raise HTTPError for bad responses
+        response.raise_for_status()
         return response.json()['choices'][0]['message']['content']
     except httpx.HTTPStatusError as e:
-        print(f"HTTP error occurred: {e}")
-        raise
-    except httpx.RequestError as e:
-        print(f"Request error occurred: {e}")
+        print(f"HTTP error: {e}")
         raise
     except Exception as e:
-        print(f"An unexpected error occurred: {e}")
+        print(f"Unexpected error: {e}")
         raise
 
 def generate_readme(df, file_path, analysis, output_dir):
-    """Generate README.md with analysis summary and insights."""
+    """Generate a professional README.md with analysis summary and insights."""
     column_info = {
         col: {"dtype": str(df[col].dtype), "examples": df[col].dropna().head().tolist() if not df[col].dropna().empty else []}
         for col in df.columns
     }
 
-    # Get dataset info without printing it to the terminal
     buffer = StringIO()
     df.info(buf=buffer)
     df_info = buffer.getvalue()
-    df_describe = df.describe(include='all').to_string()
+
+    summary = pd.DataFrame(analysis['summary']).to_string()
     missing_values = pd.Series(analysis['missing_values']).to_string()
+    correlation = pd.DataFrame(analysis['correlation']).to_string()
     outliers = pd.Series(analysis['outliers']).to_string()
 
-    # Generate narrative using analysis
-    narrative = generate_narrative(file_path, column_info, df_info, df_describe, missing_values, outliers)
+    visualizations = """Generated visualizations include correlation heatmaps, histograms, and bar charts."""
+    narrative = generate_story(file_path, column_info, df_info, summary, missing_values, correlation, outliers)
 
-    # Write README content
-    readme_content = f"""# Analysis of {file_path}
+    readme_content = f"""# Analysis of {os.path.basename(file_path)}
 
-## Detailed Explanation of the Result of Analysis
+## Dataset Overview
+
+This dataset was analyzed to uncover insights regarding its structure, trends, and patterns. The analysis focused on identifying missing values, statistical summaries, correlations, and potential outliers.
+
+## Key Insights
 
 {narrative}
 
 ## Visualizations
 
+Key visualizations include:
+- Correlation heatmap to identify relationships between numeric features.
+- Histograms for feature distribution.
+- Bar charts for categorical feature distribution.
+
+The visualizations have been saved in the output directory.
+
+### Correlation Matrix Heatmap
+![correlation_matrix_heatmap.png](correlation_matrix_heatmap.png)
+
+### Distribution of {df.select_dtypes(include=['number']).columns[0]}
+![{df.select_dtypes(include=['number']).columns[0]}_distribution.png]({df.select_dtypes(include=['number']).columns[0]}_distribution.png)
+
+### Distribution of {min(df.select_dtypes(include=['object']).columns, key=lambda col: df[col].nunique())}
+![{min(df.select_dtypes(include=['object']).columns, key=lambda col: df[col].nunique())}_bar_chart.png]({min(df.select_dtypes(include=['object']).columns, key=lambda col: df[col].nunique())}_bar_chart.png)
+
+## Conclusion
+
+This analysis provides a comprehensive understanding of the dataset, highlighting areas of interest and opportunities for further exploration.
 """
-    # Add individual column distribution plots
-    numeric_columns = df.select_dtypes(include=['number']).columns[:MAX_VISUALIZATIONS]  # Limit the number of visualizations
-
-    if len(numeric_columns) > 0:
-        chart_filename = f"{numeric_columns[0]}_distribution.png"
-        readme_content += f"### Distribution of {numeric_columns[0]}\n\n![{chart_filename}]({chart_filename})\n\n"
-
-    if len(numeric_columns) > 1:
-        chart_filename = f"{numeric_columns[0]}_vs_{numeric_columns[1]}_scatter.png"
-        readme_content += f"### Scatter Plot of {numeric_columns[0]} vs {numeric_columns[1]}\n\n![{chart_filename}]({chart_filename})\n\n"
-
-    readme_content += "### Correlation Matrix Heatmap\n\n![correlation_matrix_heatmap.png](correlation_matrix_heatmap.png)\n\n"
-
-    # Save README.md
     with open(os.path.join(output_dir, "README.md"), "w") as f:
         f.write(readme_content)
 
 def main():
-    """Main function: Load data, analyze, visualize, and generate insights."""
+    """Main function: Load, analyze, visualize, and generate insights."""
     import argparse
 
     parser = argparse.ArgumentParser(description="Analyze datasets and generate insights.")
@@ -197,21 +199,14 @@ def main():
     parser.add_argument("-o", "--output_dir", default=".", help="Directory to save outputs.")
     args = parser.parse_args()
 
-    os.makedirs(args.output_dir, exist_ok=True)  # Create output directory if it doesn't exist
+    os.makedirs(args.output_dir, exist_ok=True)
 
-    # Load dataset
     df = load_data(args.file_path)
-
-    # Analyze dataset
     analysis = analyze_data(df)
-
-    # Visualize data
     visualize_data(df, args.output_dir)
-
-    # Create README.md
     generate_readme(df, args.file_path, analysis, args.output_dir)
 
-    print("Done!")
+    print("Analysis completed and README generated.")
 
 if __name__ == "__main__":
     main()
