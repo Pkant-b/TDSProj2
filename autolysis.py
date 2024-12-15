@@ -7,7 +7,7 @@
 #   "httpx",
 #   "chardet",
 #   "numpy",
-#   "dotenv",
+#   "python-dotenv",
 # ]
 # ///
 
