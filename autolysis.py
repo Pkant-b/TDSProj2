@@ -20,11 +20,13 @@ import matplotlib
 import matplotlib.pyplot as plt
 import httpx
 import chardet
+import json
 from tenacity import retry, stop_after_attempt, wait_fixed
 from dotenv import load_dotenv
 from io import StringIO
+from typing import Dict
 
-# Force matplotlib to use non-interactive backend
+# Use a non-interactive backend for matplotlib
 matplotlib.use('Agg')
 
 # Load environment variables from a .env file
@@ -38,27 +40,35 @@ MAX_VISUALIZATIONS = 3
 if not AIPROXY_TOKEN:
     raise ValueError("API token not set. Please set AIPROXY_TOKEN in the environment.")
 
-def load_data(file_path):
+def load_data(file_path: str) -> pd.DataFrame:
     """Load CSV data with automatic encoding detection."""
     try:
         with open(file_path, 'rb') as f:
             result = chardet.detect(f.read())
         encoding = result['encoding']
-        return pd.read_csv(file_path, encoding=encoding)
+        print(f"Detected encoding: {encoding}")
+        df = pd.read_csv(file_path, encoding=encoding)
+        if df.empty:
+            raise ValueError("Dataset is empty.")
+        return df
     except Exception as e:
         print(f"Error loading file: {e}")
         sys.exit(1)
 
-def analyze_data(df):
+def analyze_data(df: pd.DataFrame) -> Dict:
     """Perform basic analysis: summary stats, missing values, and correlation."""
+    if df.empty:
+        raise ValueError("DataFrame is empty during analysis.")
+    
     numeric_df = df.select_dtypes(include=['number'])
     analysis = {
         'summary': df.describe(include='all').to_dict(),
         'missing_values': df.isnull().sum().to_dict(),
-        'correlation': numeric_df.corr().to_dict(),
+        'correlation': numeric_df.corr().to_dict() if not numeric_df.empty else {},
         'outliers': {}
     }
 
+    # Detect outliers using IQR
     for column in numeric_df.columns:
         Q1 = numeric_df[column].quantile(0.25)
         Q3 = numeric_df[column].quantile(0.75)
@@ -67,8 +77,8 @@ def analyze_data(df):
 
     return analysis
 
-def visualize_data(df, output_dir):
-    """Create and save main plots for the dataset."""
+def visualize_data(df: pd.DataFrame, output_dir: str) -> None:
+    """Create and save visualizations for the dataset."""
     sns.set(style="whitegrid")
     numeric_columns = df.select_dtypes(include=['number']).columns[:MAX_VISUALIZATIONS]
 
@@ -97,34 +107,51 @@ def visualize_data(df, output_dir):
         plt.close()
 
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
-def generate_story(file_path, column_info, df_info, summary, missing_values, correlation, outliers):
-    """Generate a narrative from the analysis using LLM."""
+def generate_story_with_function_call(df: pd.DataFrame, file_path: str, analysis: Dict, output_dir: str) -> str:
+    """Generate a narrative using LLM with function calling enabled."""
     headers = {
         'Authorization': f'Bearer {AIPROXY_TOKEN}',
         'Content-Type': 'application/json'
     }
+
+    column_info = {
+        col: {"dtype": str(df[col].dtype), "examples": df[col].dropna().head().tolist() if not df[col].dropna().empty else []}
+        for col in df.columns
+    }
+
     prompt = f"""
-    You are an AI assisting with data analysis. Here's the analysis:
+You are an AI data analyst. Here's a detailed analysis of a dataset provided by the user.
 
-    **Dataset Information:**
-    File Path: {file_path}
-    Columns and Data Types: {column_info}
-    Dataset Info: {df_info}
-    Summary Statistics: {summary}
-    Missing Values: {missing_values}
-    Correlation: {correlation}
-    Outliers: {outliers}
+**Dataset Overview:**
+File Name: {os.path.basename(file_path)}
+Number of Rows: {df.shape[0]}
+Number of Columns: {df.shape[1]}
+Column Information:
+{column_info}
 
-    Write a detailed story explaining:
-    1. The dataset and its key features.
-    2. The analysis performed and its significance.
-    3. Key insights uncovered, including insights from outliers.
-    4. Implications and recommended actions based on findings.
-    """
+**Analysis Insights:**
+- Summary Statistics:
+{pd.DataFrame(analysis['summary']).to_string()}
+- Missing Values:
+{pd.Series(analysis['missing_values']).to_string()}
+- Correlation Insights:
+{pd.DataFrame(analysis['correlation']).to_string()}
+- Outliers Detected:
+{pd.Series(analysis['outliers']).to_string()}
+
+**Your Task:**
+1. Provide a detailed narrative explaining:
+   - The structure and key characteristics of the dataset.
+   - The analysis performed and its significance.
+   - Insights uncovered from the data, focusing on trends, anomalies, and relationships.
+2. Recommend actionable next steps for further exploration or decision-making.
+"""
+
     data = {
         "model": "gpt-4o-mini",
-        "messages": [{"role": "user", "content": prompt}]
+        "messages": [{"role": "user", "content": prompt}],
     }
+
     try:
         response = httpx.post(API_URL, headers=headers, json=data, timeout=90.0)
         response.raise_for_status()
@@ -136,59 +163,64 @@ def generate_story(file_path, column_info, df_info, summary, missing_values, cor
         print(f"Unexpected error: {e}")
         raise
 
-def generate_readme(df, file_path, analysis, output_dir):
+def generate_readme(df: pd.DataFrame, file_path: str, analysis: Dict, output_dir: str) -> None:
     """Generate a professional README.md with analysis summary and insights."""
-    column_info = {
-        col: {"dtype": str(df[col].dtype), "examples": df[col].dropna().head().tolist() if not df[col].dropna().empty else []}
-        for col in df.columns
-    }
+    narrative = generate_story_with_function_call(df, file_path, analysis, output_dir)
 
-    buffer = StringIO()
-    df.info(buf=buffer)
-    df_info = buffer.getvalue()
+    # Ensure proper filenames for each plot
+    numeric_columns = df.select_dtypes(include=['number']).columns
+    categorical_columns = df.select_dtypes(include=['object']).columns
 
-    summary = pd.DataFrame(analysis['summary']).to_string()
-    missing_values = pd.Series(analysis['missing_values']).to_string()
-    correlation = pd.DataFrame(analysis['correlation']).to_string()
-    outliers = pd.Series(analysis['outliers']).to_string()
+    # Add visualizations dynamically
+    visualizations = "### Visualizations\n"
 
-    visualizations = """Generated visualizations include correlation heatmaps, histograms, and bar charts."""
-    narrative = generate_story(file_path, column_info, df_info, summary, missing_values, correlation, outliers)
+    # Heatmap visualization
+    if len(numeric_columns) > 1:
+        visualizations += """
+### Correlation Matrix Heatmap
+![Correlation Matrix Heatmap](correlation_matrix_heatmap.png)
 
+This heatmap visualizes the relationships between numeric features in the dataset.
+"""
+
+    # Histogram for the first numeric column
+    if len(numeric_columns) > 0:
+        visualizations += f"""
+### Distribution of {numeric_columns[0]}
+![{numeric_columns[0]} Distribution]({numeric_columns[0]}_distribution.png)
+
+This histogram shows the distribution of the numeric column '{numeric_columns[0]}', providing insights into its spread and frequency.
+"""
+
+    # Bar chart for the most frequent categorical column
+    if len(categorical_columns) > 0:
+        column_to_plot = min(categorical_columns, key=lambda col: df[col].nunique())
+        if df[column_to_plot].nunique() > 1:  # Ensure the column has more than 1 unique value
+            visualizations += f"""
+### Distribution of {column_to_plot}
+![{column_to_plot} Bar Chart]({column_to_plot}_bar_chart.png)
+
+This bar chart shows the distribution of the categorical column '{column_to_plot}', highlighting the frequency of each category.
+"""
+        else:
+            print(f"Skipping bar chart: {column_to_plot} has only 1 unique value.")
+    else:
+        print("No categorical columns available for bar chart.")
+
+    # Final README content
     readme_content = f"""# Analysis of {os.path.basename(file_path)}
 
 ## Dataset Overview
 
-This dataset was analyzed to uncover insights regarding its structure, trends, and patterns. The analysis focused on identifying missing values, statistical summaries, correlations, and potential outliers.
-
-## Key Insights
-
 {narrative}
 
-## Visualizations
-
-Key visualizations include:
-- Correlation heatmap to identify relationships between numeric features.
-- Histograms for feature distribution.
-- Bar charts for categorical feature distribution.
-
-The visualizations have been saved in the output directory.
-
-### Correlation Matrix Heatmap
-![correlation_matrix_heatmap.png](correlation_matrix_heatmap.png)
-
-### Distribution of {df.select_dtypes(include=['number']).columns[0]}
-![{df.select_dtypes(include=['number']).columns[0]}_distribution.png]({df.select_dtypes(include=['number']).columns[0]}_distribution.png)
-
-### Distribution of {min(df.select_dtypes(include=['object']).columns, key=lambda col: df[col].nunique())}
-![{min(df.select_dtypes(include=['object']).columns, key=lambda col: df[col].nunique())}_bar_chart.png]({min(df.select_dtypes(include=['object']).columns, key=lambda col: df[col].nunique())}_bar_chart.png)
-
-## Conclusion
-
-This analysis provides a comprehensive understanding of the dataset, highlighting areas of interest and opportunities for further exploration.
+{visualizations}
 """
+
+    # Write the README file
     with open(os.path.join(output_dir, "README.md"), "w") as f:
         f.write(readme_content)
+
 
 def main():
     """Main function: Load, analyze, visualize, and generate insights."""
