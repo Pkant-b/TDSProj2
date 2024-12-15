@@ -1,13 +1,14 @@
-# ///Script metadata
+# /// script
 # requires-python = ">=3.11"
 # dependencies = [
-#   "pandas",
 #   "seaborn",
+#   "pandas",
 #   "matplotlib",
 #   "httpx",
 #   "chardet",
-#   "python-dotenv",
-# ]///
+#   "numpy",
+# ]
+# ///
 
 import os
 import sys
