@@ -1,13 +1,14 @@
 # /// script
 # requires-python = ">=3.11"
 # dependencies = [
-#   "seaborn",
-#   "pandas",
-#   "matplotlib",
-#   "httpx",
-#   "chardet",
-#   "numpy",
-#   "python-dotenv",
+#     "seaborn",
+#     "pandas",
+#     "matplotlib",
+#     "httpx",
+#     "chardet",
+#     "numpy",
+#     "python-dotenv",
+#     "tabulate"
 # ]
 # ///
 
@@ -19,6 +20,7 @@ import matplotlib
 import matplotlib.pyplot as plt
 import httpx
 import chardet
+from tabulate import tabulate
 from dotenv import load_dotenv
 
 # Force matplotlib to use non-interactive backend
@@ -53,6 +55,16 @@ def analyze_data(df):
         'missing_values': df.isnull().sum().to_dict(),   # Count missing values per column
         'correlation': numeric_df.corr().to_dict()       # Correlation matrix for numeric columns
     }
+
+    # Outlier detection using IQR
+    outliers = {}
+    for column in numeric_df.columns:
+        Q1 = numeric_df[column].quantile(0.25)
+        Q3 = numeric_df[column].quantile(0.75)
+        IQR = Q3 - Q1
+        outliers[column] = numeric_df[(numeric_df[column] < Q1 - 1.5 * IQR) | (numeric_df[column] > Q3 + 1.5 * IQR)].shape[0]
+    analysis['outliers'] = outliers
+
     return analysis
 
 def visualize_data(df, output_dir):
@@ -67,13 +79,41 @@ def visualize_data(df, output_dir):
         plt.savefig(output_path)  # Save plot to file
         plt.close()
 
-def generate_narrative(analysis):
+    # Heatmap of the correlation matrix
+    if len(numeric_columns) > 1:
+        plt.figure(figsize=(10, 8))
+        sns.heatmap(df[numeric_columns].corr(), annot=True, cmap="coolwarm", fmt=".2f")
+        plt.title("Correlation Matrix Heatmap")
+        plt.savefig(os.path.join(output_dir, 'correlation_matrix_heatmap.png'), dpi=100)
+        plt.close()
+
+def generate_narrative(file_path, column_info, summary, missing_values, correlation, outliers):
     """Generate a narrative from the analysis using an API call."""
     headers = {
         'Authorization': f'Bearer {AIPROXY_TOKEN}',  # Bearer token for authorization
         'Content-Type': 'application/json'
     }
-    prompt = f"Provide a detailed analysis based on the following data summary: {analysis}"
+    prompt = f"""
+    You are analyzing a dataset. Below are details about it:
+
+    File: {file_path}
+    Columns and Data Types:
+    {column_info}
+
+    Summary Statistics:
+    {summary}
+
+    Missing Values:
+    {missing_values}
+
+    Correlation Matrix (if any):
+    {correlation}
+
+    Outliers Detected:
+    {outliers}
+
+    Please write a summary of this analysis, including insights and recommendations.
+    """
     data = {
         "model": "gpt-4o-mini",  # Specify the model
         "messages": [{"role": "user", "content": prompt}]
@@ -90,13 +130,72 @@ def generate_narrative(analysis):
         print(f"An unexpected error occurred: {e}")
     return "Narrative generation failed due to an error."
 
+def generate_readme(df, file_path, analysis, output_dir):
+    """Generate README.md with analysis summary and insights."""
+    column_info = {
+        col: {"dtype": str(df[col].dtype), "examples": df[col].dropna().sample(5).tolist() if not df[col].dropna().empty else []}
+        for col in df.columns
+    }
+
+    summary = tabulate(pd.DataFrame(analysis['summary']), headers='keys', tablefmt='pipe')
+    missing_values = tabulate(pd.Series(analysis['missing_values']).to_frame(), headers='keys', tablefmt='pipe')
+    correlation = tabulate(pd.DataFrame(analysis['correlation']), headers='keys', tablefmt='pipe') if analysis['correlation'] else "No correlation matrix available."
+    outliers = tabulate(pd.Series(analysis['outliers']).to_frame(), headers='keys', tablefmt='pipe')
+
+    # Generate narrative using analysis
+    narrative = generate_narrative(file_path, column_info, summary, missing_values, correlation, outliers)
+
+    # Write README content
+    readme_content = f"""# Analysis of {file_path}
+
+## Analysis Summary
+
+### Summary Statistics
+
+{summary}
+
+### Missing Values
+
+{missing_values}
+
+### Correlation Matrix
+
+{correlation}
+
+### Outliers Detected
+
+{outliers}
+
+## Insights
+
+{narrative}
+
+## Visualizations
+
+"""
+    visualization_descriptions = {
+        "correlation_matrix_heatmap.png": "### Correlation Matrix Heatmap\nHighlights the strength of relationships between numerical features.",
+    }
+
+    # Add individual column distribution plots
+    numeric_columns = df.select_dtypes(include=['number']).columns
+    for column in numeric_columns:
+        chart_filename = f"{column}_distribution.png"
+        chart_path = os.path.join(output_dir, chart_filename)
+        if os.path.exists(chart_path):
+            readme_content += f"### Distribution of {column}\n\n![{chart_filename}]({chart_filename})\n\n"
+
+    # Save README.md
+    with open(os.path.join(output_dir, "README.md"), "w") as f:
+        f.write(readme_content)
+
 def main():
     """Main function: Load data, analyze, visualize, and generate insights."""
     import argparse
 
     parser = argparse.ArgumentParser(description="Analyze datasets and generate insights.")
     parser.add_argument("file_path", help="Path to the dataset CSV file.")
-    parser.add_argument("-o", "--output_dir", default="output", help="Directory to save outputs.")
+    parser.add_argument("-o", "--output_dir", default=".", help="Directory to save outputs.")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)  # Create output directory if it doesn't exist
@@ -110,12 +209,10 @@ def main():
     # Visualize data
     visualize_data(df, args.output_dir)
 
-    # Generate narrative
-    narrative = generate_narrative(analysis)
+    # Create README.md
+    generate_readme(df, args.file_path, analysis, args.output_dir)
 
-    # Save narrative to README.md in the output directory
-    with open(os.path.join(args.output_dir, 'README.md'), 'w') as f:
-        f.write(narrative)
+    print("Done!")
 
 if __name__ == "__main__":
     main()
